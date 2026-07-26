@@ -6,7 +6,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from runbeat.planner import WORKOUTS, infer_cadence, personalize_plan
+from runbeat.planner import WORKOUTS, personalize_plan
+from runbeat.run_parser import format_pace, parse_run_csv
+from runbeat.storage import initialize_database, latest_cadence, list_runs, save_run
 from runbeat.selector import select_tracks
 from runbeat.spotify import (
     authorization_url,
@@ -22,6 +24,7 @@ st.title("🏃 RunBeat Coach")
 st.caption("Turn your latest run into a BPM-shaped Spotify playlist for the next workout.")
 
 DATA_PATH = Path("data/song_catalog.csv")
+initialize_database()
 
 
 def load_catalog() -> pd.DataFrame:
@@ -73,16 +76,51 @@ with st.sidebar:
     else:
         st.info("Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your Spotify Client ID.")
 
-st.subheader("1. Upload your latest run")
-run_file = st.file_uploader("Run CSV", type=["csv"], help="Cadence columns can be named cadence, avg_cadence, or spm.")
-if run_file:
-    run_df = pd.read_csv(run_file)
-    st.dataframe(run_df.head(20), use_container_width=True)
-else:
-    run_df = pd.DataFrame([{"distance_miles": 3.5, "pace": "9:07", "cadence": 160}])
-    st.caption("Using a 160 SPM demo run until you upload a CSV.")
+st.subheader("1. Add your latest run")
+run_file = st.file_uploader(
+    "Run CSV",
+    type=["csv"],
+    help="Supports common Garmin/Strava-style names such as distance, time, cadence/SPM, average heart rate, elevation gain, and temperature.",
+)
 
-observed_cadence = infer_cadence(run_df)
+parsed_run = None
+run_df = pd.DataFrame()
+if run_file:
+    details_left, details_right = st.columns(2)
+    with details_left:
+        run_date = st.date_input("Run date")
+    with details_right:
+        source = st.selectbox("Source", ["Garmin", "Strava", "Apple Health", "Manual CSV", "Other"])
+    notes = st.text_area("Run notes", placeholder="How did it feel? Any traffic stops, weather issues, fueling notes, or unusually good/bad songs?")
+
+    try:
+        parsed_run, run_df = parse_run_csv(run_file, source=source, run_date=run_date, notes=notes)
+        metric_columns = st.columns(5)
+        metric_columns[0].metric("Distance", f"{parsed_run.distance_miles:.2f} mi" if parsed_run.distance_miles else "—")
+        metric_columns[1].metric("Duration", f"{parsed_run.duration_seconds // 60}:{parsed_run.duration_seconds % 60:02d}" if parsed_run.duration_seconds else "—")
+        metric_columns[2].metric("Pace", format_pace(parsed_run.avg_pace_seconds))
+        metric_columns[3].metric("Cadence", f"{parsed_run.avg_cadence} SPM")
+        metric_columns[4].metric("Avg HR", str(parsed_run.avg_heart_rate or "—"))
+        with st.expander("Preview imported rows"):
+            st.dataframe(run_df.head(50), use_container_width=True)
+        if st.button("Save run to history", type="primary"):
+            save_run(parsed_run)
+            st.success("Run saved. It is now part of your training history.")
+            st.rerun()
+    except Exception as exc:
+        st.error(f"Could not parse this run file: {exc}")
+
+history = list_runs()
+if not history.empty:
+    with st.expander(f"Run history ({len(history)} saved)", expanded=False):
+        history_display = history.copy()
+        history_display["pace"] = history_display["avg_pace_seconds"].apply(format_pace)
+        columns = ["run_date", "source", "distance_miles", "pace", "avg_cadence", "avg_heart_rate", "temperature_f", "notes"]
+        st.dataframe(history_display[columns], hide_index=True, use_container_width=True)
+else:
+    st.caption("No runs saved yet. Upload your first CSV to begin building the model.")
+
+observed_cadence = parsed_run.avg_cadence if parsed_run else latest_cadence()
 
 st.subheader("2. Choose the next workout")
 left, middle, right = st.columns(3)
