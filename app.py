@@ -6,6 +6,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+from runbeat.dashboard import render_training_dashboard
 
 from runbeat.planner import WORKOUTS, personalize_plan
 from runbeat.run_parser import format_pace, parse_run_csv
@@ -272,6 +273,7 @@ if run_file:
 
 
 history = list_runs()
+render_training_dashboard(history)
 
 if not history.empty:
     with st.expander(
